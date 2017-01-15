@@ -14,11 +14,14 @@ missing_env_vars.push('CAFMAL_ALERTER_PASSWORD') if ENV['CAFMAL_ALERTER_PASSWORD
 abort "Missing required env vars! (#{missing_env_vars.join(',')})" if missing_env_vars.length > 0
 
 Sidekiq.configure_server do |config|
+  redis_db = ENV["CAFMAL-ALERTER_CACHE_DB"] || 0
+  redis_port = ENV["CAFMAL-ALERTER_CACHE_PORT"] || 6379
+
   config.redis = {
-    host: "redis" || ENV['CAFMAL_ALERTER_CACHE_HOST'],
-    port: 6379 || ENV['CAFMAL_ALERTER_CACHE_PORT'].to_i,
-    db: 0 || ENV['CAFMAL_ALERTER_CACHE_DB'].to_i,
-    password: "foobar" || ENV['CAFMAL_ALERTER_CACHE_PASSWORD'],
+    host: "redis" || ENV["CAFMAL-ALERTER_CACHE_HOST"],
+    port: redis_port.to_i,
+    db: redis_db.to_i,
+    password: "foobar" || ENV["CAFMAL-ALERTER_CACHE_PASSWORD"],
     namespace: "alerter"
   }
 end
@@ -96,7 +99,7 @@ class CafmalAlerter
       # get all events since alert's last successful execution
       timespan_length = ((DateTime.now.new_offset(0) - DateTime.parse(alert['updated_at'])) * 24 * 60 * 60).to_i
       event = Cafmal::Event.new(api_url, auth.token)
-      events = JSON.parse(event.list(timespan_length, timespan_length))
+      events = JSON.parse(event.list(timespan_length, timespan_length).body)
 
       events.each do |event|
         event_severity = 0
