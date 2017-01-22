@@ -119,20 +119,13 @@ class CafmalAlerter
 
         matched_events.push(event)
       end
-      subject = "New Cafmal Alerts (#{matched_events.length})"
-      body = ''
-      matched_events.each_with_index do |event,index|
-        body = body + "
-Event ##{index} #{event['name']}:
-#{event['message']}
----------------------------------
-        "
-      end
-      puts subject
-      puts body
+
+    # if matched_events.length > 0
+    # trigger the alert_method
+    # save an alert event
 
     end
-
+    # update alerter
   end
 
   def constantize(camel_cased_word)
