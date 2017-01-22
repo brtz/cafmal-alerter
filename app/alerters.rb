@@ -1,8 +1,6 @@
-require 'sidekiq'
-require 'sidekiq-cron'
-require 'sidekiq-limit_fetch'
 require 'cafmal'
 require 'json'
+require 'logger'
 
 # check required envs
 missing_env_vars = []
@@ -13,29 +11,17 @@ missing_env_vars.push('CAFMAL_ALERTER_EMAIL') if ENV['CAFMAL_ALERTER_EMAIL'].nil
 missing_env_vars.push('CAFMAL_ALERTER_PASSWORD') if ENV['CAFMAL_ALERTER_PASSWORD'].nil?
 abort "Missing required env vars! (#{missing_env_vars.join(',')})" if missing_env_vars.length > 0
 
-Sidekiq.configure_server do |config|
-  redis_db = ENV["CAFMAL-ALERTER_CACHE_DB"] || 0
-  redis_port = ENV["CAFMAL-ALERTER_CACHE_PORT"] || 6379
-
-  config.redis = {
-    host: "redis" || ENV["CAFMAL-ALERTER_CACHE_HOST"],
-    port: redis_port.to_i,
-    db: redis_db.to_i,
-    password: "foobar" || ENV["CAFMAL-ALERTER_CACHE_PASSWORD"],
-    namespace: "alerter"
-  }
-end
 
 class CafmalAlerter
-  include Sidekiq::Worker
+  require './app/alert_webhook'
 
-  def perform(*args)
-    api_url = args[0]['api_url']
-    uuid = args[0]['uuid']
-    team_id = args[0]['team_id'].to_i
-    email = args[0]['email']
-    password = args[0]['password']
+  @logger = nil
 
+  def initialize(logger)
+    @logger = logger
+  end
+
+  def perform(api_url, uuid, team_id, email, password)
     alerts_to_run = []
 
     auth = Cafmal::Auth.new(api_url)
@@ -52,16 +38,16 @@ class CafmalAlerter
       end
     end
 
-    params_to_w = {}
-    params_to_w['uuid'] = uuid
-    params_to_w['heartbeat_received_at'] = DateTime.now.new_offset(0)
+    params_to_a = {}
+    params_to_a['uuid'] = uuid
+    params_to_a['heartbeat_received_at'] = DateTime.now.new_offset(0)
     if existing_alerter_id.nil?
-      create_alerter_response = alerter.create(params_to_w)
+      create_alerter_response = alerter.create(params_to_a)
     else
-      params_to_w['id'] = existing_alerter_id
-      create_alerter_response = alerter.update(params_to_w)
+      params_to_a['id'] = existing_alerter_id
+      create_alerter_response = alerter.update(params_to_a)
     end
-    logger.info "Registered alerter (#{uuid}, team: #{team_id}): #{JSON.parse(create_alerter_response.body)['id']}"
+    @logger.info "Registered alerter (#{uuid}, team: #{team_id}): #{JSON.parse(create_alerter_response.body)['id']}"
 
     # get all the alerts
     alert = Cafmal::Alert.new(api_url, auth.token)
@@ -78,11 +64,11 @@ class CafmalAlerter
       alerts_to_run.push(alert)
     end
 
-    logger.info "Alerts to run:"
-    logger.info alerts_to_run.to_json
+    @logger.info "Alerts to run:"
+    @logger.info alerts_to_run.to_json
 
     alerts_to_run.each do |alert|
-      logger.info "Going to run alert: #{alert['minimum_severity']} #{alert['pattern']} #{alert['alert_method']} #{alert['alert_target']} from team: #{alert['team_id']}"
+      @logger.info "Going to run alert: #{alert['minimum_severity']} #{alert['pattern']} #{alert['alert_method']} #{alert['alert_target']} from team: #{alert['team_id']}"
       params = alert
       matched_events = []
       severity_level = 0
@@ -120,12 +106,50 @@ class CafmalAlerter
         matched_events.push(event)
       end
 
-    # if matched_events.length > 0
-    # trigger the alert_method
-    # save an alert event
+      if matched_events.length > 0
+        begin
+          @logger.info 'found matching events, going to alert'
+          alert_to_perform = constantize('Alert' + alert['alert_method'].capitalize).new(
+              matched_events,
+              'FROMTOBEIMPLEMENTED',
+              alert['alert_target']
+          )
+          result = alert_to_perform.send
 
+          @logger.info result
+
+          event = Cafmal::Event.new(api_url, auth.token)
+          params_to_e = {}
+          params_to_e['team_id'] = alert['team_id']
+          params_to_e['name'] = alert['alert_method'] + '.' + alert['alert_target']
+          params_to_e['message'] = result
+          params_to_e['kind'] = 'alert'
+          params_to_e['severity'] = alert['minimum_severity']
+
+          create_event_response = event.create(params_to_e).body
+          @logger.info "Created new event: #{JSON.parse(create_event_response)['id']}"
+        rescue Exception => e
+          @logger.error "Alert failed! #{alert} | #{e.inspect}"
+          event = Cafmal::Event.new(api_url, auth.token)
+          params_to_e = {}
+          params_to_e['team_id'] = alert['team_id']
+          params_to_e['name'] = 'alert_failed'
+          params_to_e['message'] = "Alert #{alert['alert_method']}.#{alert['alert_target']} failed: #{e.inspect}"
+          params_to_e['kind'] = 'alert'
+          params_to_e['severity'] = 'error'
+
+          create_event_response = event.create(params_to_e).body
+          @logger.info "Created new event: #{JSON.parse(create_event_response)['id']}"
+        end
+      else
+        @logger.info 'No events matching this alerter'
+      end
+
+      # update the alert
+      alert_res = Cafmal::Alert.new(api_url, auth.token)
+      params['updated_at'] = DateTime.now.new_offset(0)
+      alert_res.update(params)
     end
-    # update alerter
   end
 
   def constantize(camel_cased_word)
@@ -138,18 +162,17 @@ class CafmalAlerter
 
 end
 
-Sidekiq::Cron::Job.create(
-  name: "cafmalAlerter-#{ENV['CAFMAL_ALERTER_UUID']}",
-  cron: '*/30 * * * * *',
-  class: 'CafmalAlerter',
-  queue: "cafmalQueue-alerter-#{ENV['CAFMAL_ALERTER_TEAM_ID']}",
-  args: {
-    api_url: ENV['CAFMAL_API_URL'],
-    uuid: ENV['CAFMAL_ALERTER_UUID'],
-    team_id: ENV['CAFMAL_ALERTER_TEAM_ID'],
-    email: ENV['CAFMAL_ALERTER_EMAIL'],
-    password: ENV['CAFMAL_ALERTER_PASSWORD']
-  }
-)
-
-Sidekiq::Queue["cafmalQueue-#{ENV['CAFMAL_ALERTER_TEAM_ID']}"].limit = 1
+logger = Logger.new(STDOUT)
+alerter = CafmalAlerter.new(logger)
+loop do
+  alerter.perform(
+      ENV['CAFMAL_API_URL'],
+      ENV['CAFMAL_ALERTER_UUID'],
+      ENV['CAFMAL_ALERTER_TEAM_ID'].to_i,
+      ENV['CAFMAL_ALERTER_EMAIL'],
+      ENV['CAFMAL_ALERTER_PASSWORD']
+  )
+  logger.info 'Sleeping for 30s'
+  STDOUT.flush
+  sleep(30)
+end

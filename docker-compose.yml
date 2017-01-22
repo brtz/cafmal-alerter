@@ -1,0 +1,12 @@
+# DEVELOPMENT ONLY!
+# do not use this in production!
+version: '2'
+services:
+  cafmal-alerter-team-2:
+    build: .
+    environment:
+      - CAFMAL_API_URL=http://lurkerden.no-ip.org:8080
+      - CAFMAL_ALERTER_UUID=ca-team-2
+      - CAFMAL_ALERTER_TEAM_ID=2
+      - CAFMAL_ALERTER_EMAIL=alerter@example.com
+      - CAFMAL_ALERTER_PASSWORD=barfoo

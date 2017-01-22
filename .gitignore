@@ -44,3 +44,4 @@ bower.json
 # our own
 env*.sh
 cafmalAlerter.sh
+.idea

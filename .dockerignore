@@ -1,0 +1,12 @@
+.dockerignore
+doc/
+Dockerfile
+docker-compose.yml
+.git
+.gitignore
+.idea/
+log/*.log
+.rubocop.yml
+.ruby-version
+start_dev.sh
+test/
